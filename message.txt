@@ -1,0 +1,216 @@
+#include <Arduino.h>
+#include <ESP32Servo.h>
+#include <Bluepad32.h>
+
+#define ENA 13
+#define IN1 12
+#define IN2 14
+#define ENB 25
+#define IN3 27
+#define IN4 26
+#define ESC_PIN 18
+
+Servo esc;
+int currentSpeed   = 0;
+int targetSpeed    = 0;
+int rampRate       = 2;
+int maxSpeed       = 100;
+int softStartMax   = 30;
+bool softStartDone = false;
+
+ControllerPtr myController = nullptr;
+
+void setMotorLeft(int speed) {
+  speed = constrain(speed, -255, 255);
+  if (speed > 0) {
+    digitalWrite(IN1, HIGH); digitalWrite(IN2, LOW);
+    analogWrite(ENA, speed);
+  } else if (speed < 0) {
+    digitalWrite(IN1, LOW);  digitalWrite(IN2, HIGH);
+    analogWrite(ENA, -speed);
+  } else {
+    digitalWrite(IN1, LOW);  digitalWrite(IN2, LOW);
+    analogWrite(ENA, 0);
+  }
+}
+
+void setMotorRight(int speed) {
+  speed = constrain(speed, -255, 255);
+  if (speed > 0) {
+    digitalWrite(IN3, HIGH); digitalWrite(IN4, LOW);
+    analogWrite(ENB, speed);
+  } else if (speed < 0) {
+    digitalWrite(IN3, LOW);  digitalWrite(IN4, HIGH);
+    analogWrite(ENB, -speed);
+  } else {
+    digitalWrite(IN3, LOW);  digitalWrite(IN4, LOW);
+    analogWrite(ENB, 0);
+  }
+}
+
+void stopAll() {
+  setMotorLeft(0);
+  setMotorRight(0);
+}
+
+int speedToMicros(int percent) {
+  return map(percent, 0, 100, 1000, 2000);
+}
+
+void softStart() {
+  Serial.println("🟡 Soft Start เริ่มต้น...");
+  for (int i = 0; i <= softStartMax; i++) {
+    esc.writeMicroseconds(speedToMicros(i));
+    currentSpeed = i;
+    Serial.printf("   Speed: %d%%\n", i);
+    delay(50);
+  }
+  softStartDone = true;
+  targetSpeed   = softStartMax;
+  Serial.println("✅ Soft Start เสร็จ! พร้อมใช้งาน\n");
+}
+
+void rampSpeed(int target) {
+  target = min(target, maxSpeed);
+  if (!softStartDone) target = 0;
+
+  if (currentSpeed < target)
+    currentSpeed = min(currentSpeed + rampRate, target);
+  else if (currentSpeed > target)
+    currentSpeed = max(currentSpeed - rampRate, target);
+
+  esc.writeMicroseconds(speedToMicros(currentSpeed));
+}
+
+void calibrateESC() {
+  Serial.println("⚙️  Calibrating ESC...");
+  esc.writeMicroseconds(2000); delay(2000);
+  esc.writeMicroseconds(1000); delay(2000);
+  Serial.println("✅ Calibrate เสร็จ!");
+}
+
+void armESC() {
+  Serial.println("🔧 Arming ESC...");
+  esc.writeMicroseconds(1000);
+  delay(1500);
+  Serial.println("✅ ESC พร้อมใช้งาน!");
+}
+
+void emergencyStop() {
+  targetSpeed   = 0;
+  currentSpeed  = 0;
+  softStartDone = false;
+  esc.writeMicroseconds(1000);
+  stopAll();
+  Serial.println("🛑 หยุดฉุกเฉิน! กด A เพื่อ Soft Start ใหม่\n");
+}
+
+void onConnectedController(ControllerPtr ctl) {
+  myController = ctl;
+  Serial.println("✅ จอย Xbox เชื่อมต่อแล้ว!");
+  Serial.println("   🕹️  Joystick ซ้าย = เดินหน้า/ถอย/เลี้ยว");
+  Serial.println("   🅐   ปุ่ม A        = Soft Start ใบพัด");
+  Serial.println("   🅑   ปุ่ม B        = หยุดฉุกเฉิน");
+  Serial.println("   🔴  RB (R1)       = หมุนใบพัด (กดค้าง)\n");
+}
+
+void onDisconnectedController(ControllerPtr ctl) {
+  myController = nullptr;
+  emergencyStop();
+  Serial.println("❌ จอย Xbox หลุดการเชื่อมต่อ — หยุดทุกอย่าง");
+}
+
+void setup() {
+  Serial.begin(115200);
+  Serial.println("🚀 Robot + Thruster (RB Mode)");
+  Serial.println("==============================");
+
+  pinMode(ENA, OUTPUT); pinMode(IN1, OUTPUT); pinMode(IN2, OUTPUT);
+  pinMode(ENB, OUTPUT); pinMode(IN3, OUTPUT); pinMode(IN4, OUTPUT);
+  stopAll();
+
+  esc.setPeriodHertz(50);
+  esc.attach(ESC_PIN, 1000, 2000);
+  calibrateESC();
+  armESC();
+
+  BP32.setup(&onConnectedController, &onDisconnectedController);
+  BP32.forgetBluetoothKeys();
+  Serial.println("🎮 รอการเชื่อมต่อจอย Xbox...\n");
+}
+
+void loop() {
+  BP32.update();
+
+  static unsigned long lastWait = 0;
+  if (!myController && millis() - lastWait >= 3000) {
+    Serial.println("📡 รอจอย Xbox... (กดปุ่ม Pair บนจอยด้วย)");
+    lastWait = millis();
+  }
+
+  if (myController && myController->isConnected()) {
+
+    // --- Joystick ซ้าย → ล้อรถ ---
+    int axisY = myController->axisY();
+    int axisX = myController->axisX();
+    int fwd   = map(axisY, -512, 511, 255, -255);
+    int turn  = map(axisX, -512, 511, -255, 255);
+    if (abs(fwd)  < 15) fwd  = 0;
+    if (abs(turn) < 15) turn = 0;
+
+    // ✅ แก้ทิศทางเลี้ยวแล้ว
+    int leftSpeed  = constrain(fwd - turn, -255, 255);
+    int rightSpeed = constrain(fwd + turn, -255, 255);
+
+    setMotorLeft(leftSpeed);
+    setMotorRight(rightSpeed);
+
+    // --- ปุ่ม A → Soft Start ใบพัด ---
+    if (myController->a()) {
+      if (!softStartDone) {
+        softStart();
+      } else {
+        Serial.println("ℹ️  Soft Start ผ่านแล้ว");
+      }
+    }
+
+    // --- ปุ่ม B → หยุดฉุกเฉิน ---
+    if (myController->b()) {
+      emergencyStop();
+    }
+
+    // --- RB (R1) → ESC ใบพัด ---
+    if (softStartDone) {
+      bool rb = myController->r1();
+      static bool lastRb = false;
+
+      if (rb) {
+        targetSpeed = maxSpeed;
+        if (!lastRb) Serial.println("🔴 RB กด — ใบพัดหมุน!");
+      } else {
+        targetSpeed = 0;
+        if (lastRb) Serial.println("⚪ RB ปล่อย — ใบพัดหยุด");
+      }
+      lastRb = rb;
+    } else {
+      targetSpeed = 0;
+    }
+
+    // --- Debug ทุก 1 วินาที ---
+    static unsigned long lastPrint = 0;
+    if (millis() - lastPrint >= 1000) {
+      bool rb = myController->r1();
+      Serial.printf("🌀 ESC: %3d%% | 🚗 L: %4d  R: %4d | fwd:%4d turn:%4d | RB: %s | SoftStart: %s\n",
+        currentSpeed,
+        leftSpeed, rightSpeed,
+        fwd, turn,
+        rb ? "🔴 ON" : "⚪ OFF",
+        softStartDone ? "✅" : "⏳ (กด A)"
+      );
+      lastPrint = millis();
+    }
+  }
+
+  rampSpeed(targetSpeed);
+  delay(20);
+}
