@@ -1,4 +1,4 @@
-# ⚔️ Combat Car — [ชื่อทีม] | [ปีการแข่งขัน]
+# ⚔️ Combat Car — Extreme External | 2026
 
 > ระบบควบคุมรถ Combat แบบ Real-time ผ่าน Xbox Controller (Bluetooth) พร้อม Brushless Motor + Soft Start System
 
